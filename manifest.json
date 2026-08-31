@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "opoii.discord",
+  "name": "Discord Voice Tray",
+  "version": "1.0.0",
+  "author": "opoii",
+  "description": "Discord tray widget indicating voice state",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "Discord Tray",
+    "description": "Discord voice state icon",
+    "category": "Status",
+    "allowMultiple": false
+  }
+}
