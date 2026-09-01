@@ -11,6 +11,7 @@ Item {
   }
 
   property string discordState: "tray"
+  property bool discordRunning: false
 
   Component.onDestruction: {
     bridgeProcess.running = false
@@ -29,6 +30,9 @@ Item {
           var data = JSON.parse(raw)
           if (data.state) {
             root.discordState = data.state
+          }
+          if (data.running !== undefined) {
+            root.discordRunning = data.running
           }
         } catch (e) {
           console.warn("Discord bridge parse error:", e)

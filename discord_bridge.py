@@ -189,7 +189,7 @@ class DiscordBridge:
             if self.voice_state.get("speaking"):
                 state = "tray-speaking"
         
-        print(json.dumps({"state": state}), flush=True)
+        print(json.dumps({"state": state, "running": self.discord.connected}), flush=True)
 
     async def _send_cmd(self, cmd, args=None):
         nonce = self.discord._next_nonce()

@@ -15,9 +15,11 @@ BarWidget {
 
   readonly property var discordService: bar?.shell?.serviceFor("opoii.discord")
   property string discordState: discordService ? discordService.discordState : "tray"
+  property bool discordRunning: discordService ? discordService.discordRunning : false
 
-  implicitWidth: iconImage.implicitWidth
-  implicitHeight: iconImage.implicitHeight
+  visible: discordRunning
+  implicitWidth: discordRunning ? iconImage.implicitWidth : 0
+  implicitHeight: discordRunning ? iconImage.implicitHeight : 0
 
   Image {
     id: iconImage
