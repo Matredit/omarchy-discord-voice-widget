@@ -202,8 +202,11 @@ class DiscordBridge:
         loop = asyncio.get_running_loop()
         
         def toggle_mute():
-            new_mute = not self.settings.get("mute", False)
-            asyncio.create_task(self._send_cmd("SET_VOICE_SETTINGS", {"mute": new_mute}))
+            if self.settings.get("deaf"):
+                asyncio.create_task(self._send_cmd("SET_VOICE_SETTINGS", {"deaf": False, "mute": False}))
+            else:
+                new_mute = not self.settings.get("mute", False)
+                asyncio.create_task(self._send_cmd("SET_VOICE_SETTINGS", {"mute": new_mute}))
             
         def toggle_deafen():
             new_deaf = not self.settings.get("deaf", False)
