@@ -4,17 +4,14 @@
   "name": "Discord Voice Widget",
   "version": "1.0.0",
   "author": "Matredit",
-  "description": "Discord tray widget indicating voice state",
-  "kinds": [
-    "service",
-    "bar-widget"
-  ],
+  "description": "Discord voice state widget",
+  "kinds": ["service", "bar-widget"],
   "entryPoints": {
     "service": "Service.qml",
     "barWidget": "Widget.qml"
   },
   "barWidget": {
-    "displayName": "Discord Tray",
+    "displayName": "Discord Voice",
     "description": "Discord voice state icon",
     "category": "Status",
     "allowMultiple": false
