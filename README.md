@@ -10,18 +10,13 @@ The Windows version of Discord has much more useful tray icon: it shows when you
 
 ## Features
 
-- **Live Voice Status:** Displays real-time voice channel states:
-  - Connected (`tray-connected.png`)
-  - Speaking (`tray-speaking.png`)
-  - Muted (`tray-muted.png`)
-  - Deafened (`tray-deafened.png`)
+- **Live Voice Status:** Displays real-time voice channel states: (connected, speaking, muted, deafened) just like Discord should have done.
 - **Auto-Hide:** Completely collapses and takes zero space on the bar when you are not in an active voice channel or when Discord is closed.
 - **Quick Controls:**
   - **Left Click:** Toggle Mute (or Undeafen & Unmute if deafened, matching native Discord behavior).
   - **Right Click:** Toggle Deafen.
 - **Global Keybinding Support:** Supports instantaneous toggling via standard POSIX signals, bypassing Wayland global hotkey limitations in Discord.
 - **Multi-Monitor Optimized:** Built using Omarchy's singleton `service` architecture so only a single lightweight background daemon runs across multiple displays.
-- **Zero External Dependencies:** The bridge is pure Python 3 using only standard library modules.
 
 ## How It Works
 
@@ -34,12 +29,23 @@ The Windows version of Discord has much more useful tray icon: it shows when you
 4. **Low-Latency Signaling:**
    The daemon writes its PID to `/tmp/opoii_discord_bridge_$(id -u).pid`. Interactions trigger `SIGUSR1` (Mute) and `SIGUSR2` (Deafen) directly to the process, executing state changes in under 1ms.
 
-### [Installation](https://omarchy.org/manual/shell-plugins/#adding-a-plugin-from-git)
+### Authentication & Permissions
 
+On first launch, Discord will show a one-time authorization prompt for **"Discord StreamKit Overlay"**:
+
+- Discord's local RPC requires OAuth scopes (`rpc.voice.read`, `rpc.voice.write`) to inspect voice status and toggle mute/deafen.
+- Using Discord's official first-party StreamKit client ID allows the plugin to work out-of-the-box without requiring users to create and configure their own Discord Developer App.
+- The granted token is cached locally in `~/.cache/omarchy/discord_plugin/token.json` so you only need to authorize it once.
+
+The icon may show a few seconds later if you just launched discord and joined a channel straight away.
+
+## Installation
+
+Follow the [manual](https://omarchy.org/manual/shell-plugins/#adding-a-plugin-from-git) or  
 Use `Add Plugin` in the Omarchy menu and paste
 `https://github.com/Matredit/omarchy-discord-voice-widget.git`
 
-### Removal
+## Removal
 
 Use `Remove Plugin` in the Omarchy menu and choose `opoii.discord`
 
