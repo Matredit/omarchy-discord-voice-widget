@@ -37,11 +37,8 @@ BarWidget {
     cursorShape: Qt.PointingHandCursor
     onClicked: function(mouse) {
       if (!discordRunning) return
-      if (mouse.button === Qt.LeftButton) {
-        root.bar.run("pkill -USR1 -f discord_bridge.py")
-      } else if (mouse.button === Qt.RightButton) {
-        root.bar.run("pkill -USR2 -f discord_bridge.py")
-      }
+      var cmd = mouse.button === Qt.LeftButton ? "kill -USR1 $(cat /tmp/opoii_discord_bridge_$(id -u).pid)" : "kill -USR2 $(cat /tmp/opoii_discord_bridge_$(id -u).pid)"
+      root.bar.run(cmd)
     }
   }
 }

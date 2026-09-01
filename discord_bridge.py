@@ -201,6 +201,13 @@ class DiscordBridge:
     async def run(self):
         loop = asyncio.get_running_loop()
         
+        pid_file = f"/tmp/opoii_discord_bridge_{os.getuid()}.pid"
+        try:
+            with open(pid_file, "w") as f:
+                f.write(str(os.getpid()))
+        except Exception:
+            pass
+        
         def toggle_mute():
             if self.settings.get("deaf"):
                 asyncio.create_task(self._send_cmd("SET_VOICE_SETTINGS", {"deaf": False, "mute": False}))
