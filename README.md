@@ -27,7 +27,7 @@ The Windows version of Discord has much more useful tray icon: it shows when you
 3. **Bar Widget (`Widget.qml`):**
    The frontend UI that dynamically loads status icons, collapses when inactive, and executes low-latency signals upon interaction.
 4. **Low-Latency Signaling:**
-   The daemon writes its PID to `/tmp/opoii_discord_bridge_$(id -u).pid`. Interactions trigger `SIGUSR1` (Mute) and `SIGUSR2` (Deafen) directly to the process, executing state changes in under 1ms.
+   The daemon writes its PID to `$XDG_RUNTIME_DIR/discord_bridge.pid`. Interactions trigger `SIGUSR1` (Mute) and `SIGUSR2` (Deafen) directly to the process, executing state changes in under 1ms.
 
 ### Authentication & Permissions
 
@@ -56,9 +56,9 @@ Default Discord hotkeys might not work on Wayland, so you can bind mute/deafen h
 ```lua
 -- Toggle Discord Mute
 hl.unbind("ALT + Z")
-o.bind("ALT + Z", "Discord toggle mute", "kill -USR1 $(cat /tmp/opoii_discord_bridge_$(id -u).pid)")
+o.bind("ALT + Z", "Discord toggle mute", "kill -USR1 $(cat $XDG_RUNTIME_DIR/discord_bridge.pid)")
 
 -- Toggle Discord Deafen
 hl.unbind("SUPER + ALT + Z")
-o.bind("SUPER + ALT + Z", "Discord toggle deafen", "kill -USR2 $(cat /tmp/opoii_discord_bridge_$(id -u).pid)")
+o.bind("SUPER + ALT + Z", "Discord toggle deafen", "kill -USR2 $(cat $XDG_RUNTIME_DIR/discord_bridge.pid)")
 ```

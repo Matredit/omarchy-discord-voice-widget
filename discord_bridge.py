@@ -201,7 +201,10 @@ class DiscordBridge:
     async def run(self):
         loop = asyncio.get_running_loop()
         
-        pid_file = f"/tmp/opoii_discord_bridge_{os.getuid()}.pid"
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/opoii_discord_{os.getuid()}"
+        if not os.path.exists(runtime_dir):
+            os.makedirs(runtime_dir, exist_ok=True, mode=0o700)
+        pid_file = os.path.join(runtime_dir, "discord_bridge.pid")
         try:
             with open(pid_file, "w") as f:
                 f.write(str(os.getpid()))

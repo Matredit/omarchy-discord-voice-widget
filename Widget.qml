@@ -37,7 +37,9 @@ BarWidget {
     cursorShape: Qt.PointingHandCursor
     onClicked: function(mouse) {
       if (!discordRunning) return
-      var cmd = mouse.button === Qt.LeftButton ? "kill -USR1 $(cat /tmp/opoii_discord_bridge_$(id -u).pid)" : "kill -USR2 $(cat /tmp/opoii_discord_bridge_$(id -u).pid)"
+      var runtimeDir = Quickshell.env("XDG_RUNTIME_DIR") || ("/tmp/opoii_discord_" + Quickshell.env("UID"))
+      var pidFile = runtimeDir + "/discord_bridge.pid"
+      var cmd = mouse.button === Qt.LeftButton ? "kill -USR1 $(cat " + pidFile + " 2>/dev/null)" : "kill -USR2 $(cat " + pidFile + " 2>/dev/null)"
       root.bar.run(cmd)
     }
   }
