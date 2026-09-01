@@ -38,6 +38,7 @@ On first launch, Discord will show a one-time authorization prompt for **"Discor
 - The granted token is cached locally in `~/.cache/omarchy/discord_plugin/token.json` so you only need to authorize it once.
 
 The icon may show a few seconds later if you just launched discord and joined a channel straight away.
+If you reconnected to a voice channel from another device, the icon may freeze, Update → Process → Shell will fix that
 
 ## Installation
 
