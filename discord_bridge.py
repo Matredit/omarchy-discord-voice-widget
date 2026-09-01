@@ -5,6 +5,16 @@ import os
 import struct
 import sys
 import urllib.request
+import ctypes
+import signal
+
+# Ensure the process dies if the parent (omarchy-shell) dies
+try:
+    libc = ctypes.CDLL("libc.so.6")
+    libc.prctl(1, signal.SIGTERM)
+except Exception:
+    pass
+
 
 DEFAULT_CLIENT_ID = "207646673902501888"
 OAUTH_SCOPES = ["rpc", "rpc.voice.read", "rpc.voice.write"]

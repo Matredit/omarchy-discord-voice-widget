@@ -8,15 +8,22 @@ BarWidget {
   id: root
   moduleName: "opoii.discord"
 
+  property string _pluginDir: {
+    var url = Qt.resolvedUrl(".").toString().replace("file://", "")
+    return url.endsWith("/") ? url : url + "/"
+  }
   property string discordState: "tray"
-  property string iconsDir: Quickshell.env("HOME") + "/.config/omarchy/plugins/opoii.discord/icons/"
 
   implicitWidth: iconImage.implicitWidth
   implicitHeight: iconImage.implicitHeight
 
+  Component.onDestruction: {
+    bridgeProcess.running = false
+  }
+
   Process {
     id: bridgeProcess
-    command: ["python3", Quickshell.env("HOME") + "/.config/omarchy/plugins/opoii.discord/discord_bridge.py"]
+    command: ["python3", root._pluginDir + "discord_bridge.py"]
     running: true
 
     stdout: SplitParser {
@@ -38,7 +45,7 @@ BarWidget {
   Image {
     id: iconImage
     anchors.centerIn: parent
-    source: "file://" + root.iconsDir + root.discordState + ".png"
+    source: "file://" + root._pluginDir + "icons/" + root.discordState + ".png"
     width: Style.space(14)
     height: Style.space(14)
     fillMode: Image.PreserveAspectFit
