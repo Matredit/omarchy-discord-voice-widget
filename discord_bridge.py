@@ -199,11 +199,27 @@ class DiscordBridge:
         await self.discord.send_frame(OP_FRAME, payload)
 
     async def run(self):
+        loop = asyncio.get_running_loop()
+        
+        def toggle_mute():
+            new_mute = not self.settings.get("mute", False)
+            asyncio.create_task(self._send_cmd("SET_VOICE_SETTINGS", {"mute": new_mute}))
+            
+        def toggle_deafen():
+            new_deaf = not self.settings.get("deaf", False)
+            asyncio.create_task(self._send_cmd("SET_VOICE_SETTINGS", {"deaf": new_deaf}))
+            
+        loop.add_signal_handler(signal.SIGUSR1, toggle_mute)
+        loop.add_signal_handler(signal.SIGUSR2, toggle_deafen)
+
         while True:
             try:
                 if not await self.discord.connect():
                     await asyncio.sleep(5)
                     continue
+                
+                self.emit_state()
+                
                 await self.discord.handshake(DEFAULT_CLIENT_ID)
                 if token := (self.tokens.access_token or self.tokens.load()):
                     nonce = await self.discord.authenticate(token)

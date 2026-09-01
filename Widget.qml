@@ -13,7 +13,7 @@ BarWidget {
     return url.endsWith("/") ? url : url + "/"
   }
 
-  readonly property var discordService: bar?.shell?.serviceFor("opoii.discord")
+  readonly property var discordService: bar?.shell?.ensureService("opoii.discord")
   property string discordState: discordService ? discordService.discordState : "tray"
   property bool discordRunning: discordService ? discordService.discordRunning : false
 
@@ -28,5 +28,19 @@ BarWidget {
     width: Style.space(14)
     height: Style.space(14)
     fillMode: Image.PreserveAspectFit
+  }
+
+  MouseArea {
+    anchors.fill: parent
+    acceptedButtons: Qt.LeftButton | Qt.RightButton
+    cursorShape: Qt.PointingHandCursor
+    onClicked: function(mouse) {
+      if (!discordRunning) return
+      if (mouse.button === Qt.LeftButton) {
+        root.bar.run("pkill -USR1 -f discord_bridge.py")
+      } else if (mouse.button === Qt.RightButton) {
+        root.bar.run("pkill -USR2 -f discord_bridge.py")
+      }
+    }
   }
 }
