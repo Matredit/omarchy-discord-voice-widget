@@ -1,13 +1,11 @@
 {
   "schemaVersion": 1,
   "id": "opoii.discord",
-  "name": "Discord Voice Tray",
+  "name": "Discord Voice Widget",
   "version": "1.0.0",
-  "author": "opoii",
+  "author": "Matredit",
   "description": "Discord tray widget indicating voice state",
-  "kinds": [
-    "bar-widget"
-  ],
+  "kinds": ["bar-widget"],
   "entryPoints": {
     "barWidget": "Widget.qml"
   },

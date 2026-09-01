@@ -39,8 +39,8 @@ BarWidget {
     id: iconImage
     anchors.centerIn: parent
     source: "file://" + root.iconsDir + root.discordState + ".png"
-    width: Style.space(24)
-    height: Style.space(24)
+    width: Style.space(14)
+    height: Style.space(14)
     fillMode: Image.PreserveAspectFit
   }
 }
