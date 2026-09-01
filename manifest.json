@@ -5,8 +5,12 @@
   "version": "1.0.0",
   "author": "Matredit",
   "description": "Discord tray widget indicating voice state",
-  "kinds": ["bar-widget"],
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
   "entryPoints": {
+    "service": "Service.qml",
     "barWidget": "Widget.qml"
   },
   "barWidget": {
