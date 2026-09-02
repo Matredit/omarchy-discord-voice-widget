@@ -21,7 +21,7 @@ The Windows version of Discord has much more useful tray icon: it shows when you
 ## Known Quirks
 
 - If you join a voice channel immediately after launching Discord, the icon may take a few seconds to appear (the bridge retries connecting to Discord every 5 seconds when Discord isn't running).
-- If you transfer or reconnect to a voice channel from another device, Discord's local RPC may still report you as connected until you explicitly disconnect.
+- If you transfer or reconnect to a voice channel from another device, the widget may still show you as connected until you explicitly disconnect.
 
 ## Installation & Setup
 
