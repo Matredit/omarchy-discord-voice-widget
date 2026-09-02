@@ -10,6 +10,9 @@ BarWidget {
 
   property string _pluginDir: {
     var url = Qt.resolvedUrl(".").toString().replace("file://", "")
+    try {
+      url = decodeURIComponent(url)
+    } catch (e) {}
     return url.endsWith("/") ? url : url + "/"
   }
 
@@ -36,11 +39,12 @@ BarWidget {
     acceptedButtons: Qt.LeftButton | Qt.RightButton
     cursorShape: Qt.PointingHandCursor
     onClicked: function(mouse) {
-      if (!discordRunning) return
-      var runtimeDir = Quickshell.env("XDG_RUNTIME_DIR") || ("/tmp/opoii_discord_" + Quickshell.env("UID"))
-      var pidFile = runtimeDir + "/discord_bridge.pid"
-      var cmd = mouse.button === Qt.LeftButton ? "kill -USR1 $(cat " + pidFile + " 2>/dev/null)" : "kill -USR2 $(cat " + pidFile + " 2>/dev/null)"
-      root.bar.run(cmd)
+      if (!discordRunning || !discordService) return
+      if (mouse.button === Qt.LeftButton) {
+        discordService.toggleMute()
+      } else {
+        discordService.toggleDeafen()
+      }
     }
   }
 }

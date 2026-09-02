@@ -26,8 +26,8 @@ The Windows version of Discord has much more useful tray icon: it shows when you
    A singleton background service that manages the lifecycle of the Python daemon, parsing state streams and exposing properties to the shell.
 3. **Bar Widget (`Widget.qml`):**
    The frontend UI that dynamically loads status icons, collapses when inactive, and executes low-latency signals upon interaction.
-4. **Low-Latency Signaling:**
-   The daemon writes its PID to `$XDG_RUNTIME_DIR/discord_bridge.pid`. Interactions trigger `SIGUSR1` (Mute) and `SIGUSR2` (Deafen) directly to the process, executing state changes in under 1ms.
+4. **Low-Latency Direct IPC & Safe Signaling:**
+   Interactions in the bar widget communicate directly with the daemon process via stdin IPC through the singleton Omarchy service. For global hotkeys, the daemon writes a verified PID identity record and provides CLI commands (`--toggle-mute`, `--toggle-deafen`) that validate process ownership, start time, and executable identity before signaling to eliminate PID reuse vulnerabilities.
 
 ### Authentication & Permissions
 
@@ -35,7 +35,7 @@ On first launch, Discord will show a one-time authorization prompt for **"Discor
 
 - Discord's local RPC requires OAuth scopes (`rpc.voice.read`, `rpc.voice.write`) to inspect voice status and toggle mute/deafen.
 - Using Discord's official first-party StreamKit client ID allows the plugin to work out-of-the-box without requiring users to create and configure their own Discord Developer App.
-- The granted token is cached locally in `~/.cache/omarchy/discord_plugin/token.json` so you only need to authorize it once.
+- The granted token is cached locally in `~/.cache/omarchy/discord_plugin/token.json` (protected with strict 0600 mode and private directory permissions) so you only need to authorize it once.
 
 The icon may show a few seconds later if you just launched discord and joined a channel straight away.
 If you reconnected to a voice channel from another device, the icon may freeze, Update → Process → Shell will fix that
@@ -57,9 +57,9 @@ Default Discord hotkeys might not work on Wayland, so you can bind mute/deafen h
 ```lua
 -- Toggle Discord Mute
 hl.unbind("ALT + Z")
-o.bind("ALT + Z", "Discord toggle mute", "kill -USR1 $(cat $XDG_RUNTIME_DIR/discord_bridge.pid)")
+o.bind("ALT + Z", "Discord toggle mute", "python3 ~/.config/omarchy/plugins/opoii.discord/discord_bridge.py --toggle-mute")
 
 -- Toggle Discord Deafen
 hl.unbind("SUPER + ALT + Z")
-o.bind("SUPER + ALT + Z", "Discord toggle deafen", "kill -USR2 $(cat $XDG_RUNTIME_DIR/discord_bridge.pid)")
+o.bind("SUPER + ALT + Z", "Discord toggle deafen", "python3 ~/.config/omarchy/plugins/opoii.discord/discord_bridge.py --toggle-deafen")
 ```
