@@ -7,6 +7,9 @@ Item {
 
   property string _pluginDir: {
     var url = Qt.resolvedUrl(".").toString().replace("file://", "")
+    try {
+      url = decodeURIComponent(url)
+    } catch (e) {}
     return url.endsWith("/") ? url : url + "/"
   }
 
@@ -46,11 +49,12 @@ Item {
         if (!raw) return
         try {
           var data = JSON.parse(raw)
-          if (data.state) {
+          var validStates = ["tray", "tray-connected", "tray-muted", "tray-deafened", "tray-speaking"]
+          if (data.state && validStates.indexOf(data.state) !== -1) {
             root.discordState = data.state
           }
           if (data.running !== undefined) {
-            root.discordRunning = data.running
+            root.discordRunning = Boolean(data.running)
           }
         } catch (e) {
           console.warn("Discord bridge parse error:", e)

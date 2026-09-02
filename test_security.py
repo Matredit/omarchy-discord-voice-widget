@@ -182,6 +182,47 @@ class TestDiscordIPCSecurity(unittest.IsolatedAsyncioTestCase):
             server.close()
             await server.wait_closed()
 
+    async def test_handshake_rejects_fake_endpoint(self):
+        """Item 1: Handshake rejects non-Discord endpoints to prevent token leakage."""
+        reader = asyncio.StreamReader()
+        writer = unittest.mock.MagicMock()
+        writer.drain = unittest.mock.AsyncMock()
+        ipc = DiscordIPC()
+        ipc.reader = reader
+        ipc.writer = writer
+
+        # Fake endpoint response: wrong event or missing discord config
+        fake_payload = json.dumps({"cmd": "DISPATCH", "evt": "OTHER", "data": {}}).encode("utf-8")
+        header = struct.pack("<II", OP_FRAME, len(fake_payload))
+        reader.feed_data(header + fake_payload)
+
+        with self.assertRaises(ConnectionError) as ctx:
+            await ipc.handshake("test_client")
+        self.assertIn("not a Discord READY dispatch", str(ctx.exception))
+
+    async def test_handshake_accepts_valid_discord_ready(self):
+        """Item 1: Handshake accepts genuine Discord READY dispatch."""
+        reader = asyncio.StreamReader()
+        writer = unittest.mock.MagicMock()
+        writer.drain = unittest.mock.AsyncMock()
+        ipc = DiscordIPC()
+        ipc.reader = reader
+        ipc.writer = writer
+
+        valid_payload = json.dumps({
+            "cmd": "DISPATCH",
+            "evt": "READY",
+            "data": {
+                "v": 1,
+                "config": {"cdn_host": "cdn.discordapp.com", "api_endpoint": "//discord.com/api"}
+            }
+        }).encode("utf-8")
+        header = struct.pack("<II", OP_FRAME, len(valid_payload))
+        reader.feed_data(header + valid_payload)
+
+        data = await ipc.handshake("test_client")
+        self.assertEqual(data.get("evt"), "READY")
+
 
 class TestTokenManagerSecurity(unittest.TestCase):
     def setUp(self):
@@ -310,6 +351,17 @@ class TestTokenManagerSecurity(unittest.TestCase):
             token = TokenManager.exchange_code("valid_code_123")
             self.assertEqual(token, "valid_token_abc")
 
+    def test_verify_private_dir_rejects_intermediate_symlink(self):
+        """Item 2: Directory chain verification strictly rejects intermediate symlinks."""
+        real_parent = os.path.join(self.td.name, "real_parent")
+        os.makedirs(real_parent, mode=0o700)
+        symlink_parent = os.path.join(self.td.name, "symlink_parent")
+        os.symlink(real_parent, symlink_parent)
+
+        target_dir = os.path.join(symlink_parent, "child_dir")
+        with self.assertRaises((RuntimeError, OSError)):
+            verify_private_dir(target_dir, create=True)
+
 
 class TestPIDManagerSecurity(unittest.TestCase):
     def setUp(self):
@@ -374,6 +426,44 @@ class TestPIDManagerSecurity(unittest.TestCase):
 
             result = PIDManager.signal_bridge(signal.SIGUSR1)
             self.assertFalse(result)
+
+    def test_signal_bridge_rejects_missing_or_zero_starttime(self):
+        """Item 3: Ensure signal_bridge rejects records with zero or missing starttime."""
+        with patch("discord_bridge.get_verified_runtime_dir", return_value=self.runtime_dir):
+            fake_record = {
+                "pid": os.getpid(),
+                "uid": os.getuid(),
+                "starttime": 0,
+                "comm": "discord_bridge.py"
+            }
+            pid_file = os.path.join(self.runtime_dir, PIDManager.PID_FILENAME)
+            with open(pid_file, "w") as f:
+                json.dump(fake_record, f)
+
+            self.assertFalse(PIDManager.signal_bridge(signal.SIGUSR1))
+
+    def test_signal_bridge_rejects_cmdline_mismatch(self):
+        """Item 3: Ensure signal_bridge verifies executable identity via cmdline."""
+        with patch("discord_bridge.get_verified_runtime_dir", return_value=self.runtime_dir):
+            fake_record = {
+                "pid": os.getpid(),
+                "uid": os.getuid(),
+                "starttime": PIDManager.get_process_starttime(os.getpid()),
+                "comm": "discord_bridge.py"
+            }
+            pid_file = os.path.join(self.runtime_dir, PIDManager.PID_FILENAME)
+            with open(pid_file, "w") as f:
+                json.dump(fake_record, f)
+
+            orig_open = open
+            def fake_open(file, *args, **kwargs):
+                if str(file).endswith("/cmdline"):
+                    import io
+                    return io.BytesIO(b"grep\x00discord_bridge\x00")
+                return orig_open(file, *args, **kwargs)
+
+            with patch("builtins.open", side_effect=fake_open):
+                self.assertFalse(PIDManager.signal_bridge(signal.SIGUSR1))
 
 
 class TestBridgeControl(unittest.IsolatedAsyncioTestCase):
@@ -463,6 +553,26 @@ class TestBridgeControl(unittest.IsolatedAsyncioTestCase):
             finally:
                 proc.kill()
                 proc.wait()
+
+    async def test_malformed_json_frame_does_not_crash_bridge(self):
+        """Item 1: Ensure malformed nested frame fields do not crash the bridge."""
+        bridge = DiscordBridge()
+        bridge.discord.writer = unittest.mock.MagicMock()
+        bridge.discord.writer.is_closing.return_value = False
+
+        # Malformed payloads with unexpected non-dict nested structures
+        bad_messages = [
+            {"cmd": "DISPATCH", "evt": "ERROR", "data": "plain string error"},
+            {"cmd": "DISPATCH", "evt": "VOICE_STATE_UPDATE", "data": {"user": "not_dict", "voice_state": []}},
+            {"cmd": "DISPATCH", "evt": "VOICE_CHANNEL_SELECT", "data": 12345},
+            {"cmd": "AUTHORIZE", "data": None, "nonce": "99"},
+        ]
+
+        for msg in bad_messages:
+            try:
+                await bridge._handle_message(msg)
+            except Exception as e:
+                self.fail(f"Bridge crashed on malformed message {msg}: {e}")
 
 
 if __name__ == "__main__":

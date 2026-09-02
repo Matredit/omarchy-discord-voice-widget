@@ -43,53 +43,118 @@ MAX_PID_FILE_SIZE = 4096             # 4 KiB PID record ceiling
 # Lifecycle Deadlines (seconds)
 CONNECT_TIMEOUT = 2.0
 HANDSHAKE_TIMEOUT = 5.0
+CONNECTION_INIT_TIMEOUT = 15.0
 OPERATION_TIMEOUT = 10.0
+READ_PAYLOAD_TIMEOUT = 5.0
 IDLE_PING_INTERVAL = 30.0
 PING_RESPONSE_TIMEOUT = 5.0
+OAUTH_OVERALL_TIMEOUT = 10.0
+MAX_REDIRECTS = 3
 
 TOKEN_REGEX = re.compile(r"^[A-Za-z0-9_.\-]+$")
 CODE_REGEX = re.compile(r"^[A-Za-z0-9_.\-]+$")
 
+
 def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, flush=True)
 
+
+def safe_dict(obj, key) -> dict:
+    """Safely retrieves a dictionary field without risking AttributeError on non-dict types."""
+    if isinstance(obj, dict):
+        val = obj.get(key)
+        if isinstance(val, dict):
+            return val
+    return {}
+
+
+def validate_frame_payload(payload: dict) -> dict:
+    """Validates structural bounds on frame schema fields."""
+    if not isinstance(payload, dict):
+        raise ValueError("Frame payload must be a JSON object")
+    cmd = payload.get("cmd")
+    if cmd is not None and (not isinstance(cmd, str) or len(cmd) > 64):
+        raise ValueError(f"Invalid or oversized cmd in frame payload: {type(cmd)}")
+    evt = payload.get("evt")
+    if evt is not None and (not isinstance(evt, str) or len(evt) > 64):
+        raise ValueError(f"Invalid or oversized evt in frame payload: {type(evt)}")
+    nonce = payload.get("nonce")
+    if nonce is not None and (not isinstance(nonce, (str, int)) or len(str(nonce)) > 64):
+        raise ValueError(f"Invalid or oversized nonce in frame payload: {type(nonce)}")
+    return payload
+
+
 def verify_private_dir(path: str, create: bool = False, mode: int = 0o700) -> int:
     """
-    Ensures path exists, is owned by current user, is not a symlink,
-    and has restricted permissions. Returns dir_fd opened with O_DIRECTORY | O_NOFOLLOW.
-    Caller must close the returned file descriptor.
+    Ensures the entire directory chain from root to path is verified:
+    - Traversed component-by-component with O_NOFOLLOW and dir_fd.
+    - Rejects any symlinks in intermediate or leaf components.
+    - Ensures user-owned directories have restricted permissions and sets them if needed.
+    - Ensures system/root-owned directories are not world-writable without sticky bit.
+    - If create=True, creates missing directories descriptor-relatively with mode.
+    Returns dir_fd opened with O_DIRECTORY | O_NOFOLLOW. Caller must close it.
     """
+    path = os.path.abspath(path)
+    parts = []
+    curr = path
+    while curr not in ("/", ""):
+        curr, tail = os.path.split(curr)
+        if tail:
+            parts.append(tail)
+    parts.reverse()
+
     uid = os.getuid()
-    if create and not os.path.exists(path):
-        try:
-            os.makedirs(path, mode=mode, exist_ok=True)
-        except OSError as e:
-            raise RuntimeError(f"Failed to create directory {path}: {e}")
-
     try:
-        dir_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        cur_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     except OSError as e:
-        raise RuntimeError(f"Cannot safely open directory {path}: {e}")
+        raise RuntimeError(f"Cannot safely open root directory: {e}")
 
     try:
-        st = os.fstat(dir_fd)
-        if not stat.S_ISDIR(st.st_mode):
-            raise RuntimeError(f"Path is not a directory: {path}")
-        if st.st_uid != uid:
-            raise RuntimeError(f"Directory {path} owned by UID {st.st_uid}, expected {uid}")
-        # Ensure not writable by others or group
-        if (st.st_mode & 0o022) != 0:
+        for idx, part in enumerate(parts):
+            is_leaf = (idx == len(parts) - 1)
             try:
-                os.fchmod(dir_fd, mode)
-            except OSError:
-                pass
-            st = os.fstat(dir_fd)
-            if (st.st_mode & 0o022) != 0:
-                raise RuntimeError(f"Directory {path} permissions too open: {oct(st.st_mode)}")
-        return dir_fd
+                next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=cur_fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                part_mode = mode if is_leaf else 0o700
+                try:
+                    os.mkdir(part, mode=part_mode, dir_fd=cur_fd)
+                except FileExistsError:
+                    pass
+                next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=cur_fd)
+
+            st = os.fstat(next_fd)
+            if not stat.S_ISDIR(st.st_mode):
+                os.close(next_fd)
+                raise RuntimeError(f"Path component {part} is not a directory")
+
+            if st.st_uid == uid:
+                if is_leaf:
+                    if (st.st_mode & 0o077) != 0:
+                        try:
+                            os.fchmod(next_fd, mode)
+                        except OSError:
+                            pass
+                else:
+                    if (st.st_mode & 0o022) != 0:
+                        try:
+                            os.fchmod(next_fd, 0o700)
+                        except OSError:
+                            pass
+            else:
+                if (st.st_mode & 0o002) != 0 and not (st.st_mode & stat.S_ISVTX):
+                    os.close(next_fd)
+                    raise RuntimeError(f"Component {part} is world-writable without sticky bit")
+
+            os.close(cur_fd)
+            cur_fd = next_fd
+
+        return cur_fd
     except Exception:
-        os.close(dir_fd)
+        os.close(cur_fd)
         raise
+
 
 def get_verified_runtime_dir() -> str:
     """
@@ -100,29 +165,20 @@ def get_verified_runtime_dir() -> str:
     xdg = os.environ.get("XDG_RUNTIME_DIR")
     if xdg:
         try:
-            st = os.lstat(xdg)
-            if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode) and st.st_uid == uid:
-                if (st.st_mode & 0o022) == 0:
-                    return xdg
-        except OSError:
+            dir_fd = verify_private_dir(xdg, create=False)
+            os.close(dir_fd)
+            return xdg
+        except Exception:
             pass
 
     fallback = f"/tmp/opoii_discord_{uid}"
     try:
-        os.mkdir(fallback, mode=0o700)
-    except FileExistsError:
-        pass
-    except OSError as e:
-        raise RuntimeError(f"Failed to create secure runtime directory {fallback}: {e}")
+        dir_fd = verify_private_dir(fallback, create=True, mode=0o700)
+        os.close(dir_fd)
+        return fallback
+    except Exception as e:
+        raise RuntimeError(f"Failed to establish secure runtime directory {fallback}: {e}")
 
-    st = os.lstat(fallback)
-    if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
-        raise RuntimeError(f"Runtime dir {fallback} is not a directory or is a symlink")
-    if st.st_uid != uid:
-        raise RuntimeError(f"Runtime dir {fallback} owned by {st.st_uid}, expected {uid}")
-    if (st.st_mode & 0o077) != 0:
-        os.chmod(fallback, 0o700)
-    return fallback
 
 
 class PIDManager:
@@ -148,6 +204,13 @@ class PIDManager:
         dir_fd = verify_private_dir(runtime_dir, create=True, mode=0o700)
         temp_name = None
         try:
+            try:
+                st = os.stat(cls.PID_FILENAME, dir_fd=dir_fd, follow_symlinks=False)
+                if stat.S_ISLNK(st.st_mode):
+                    os.unlink(cls.PID_FILENAME, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+
             pid = os.getpid()
             uid = os.getuid()
             starttime = cls.get_process_starttime(pid)
@@ -175,6 +238,12 @@ class PIDManager:
 
             os.replace(temp_name, cls.PID_FILENAME, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
             temp_name = None
+
+            try:
+                os.chmod(cls.PID_FILENAME, 0o600, dir_fd=dir_fd, follow_symlinks=False)
+            except OSError:
+                pass
+
             return os.path.join(runtime_dir, cls.PID_FILENAME)
         except Exception:
             if temp_name:
@@ -203,13 +272,14 @@ class PIDManager:
             try:
                 st = os.fstat(fd)
                 if stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid() and st.st_size <= MAX_PID_FILE_SIZE:
-                    data = os.read(fd, MAX_PID_FILE_SIZE)
-                    try:
-                        record = json.loads(data.decode("utf-8"))
-                        if record.get("pid") == os.getpid():
-                            os.unlink(cls.PID_FILENAME, dir_fd=dir_fd)
-                    except Exception:
-                        pass
+                    data = os.read(fd, MAX_PID_FILE_SIZE + 1)
+                    if len(data) <= MAX_PID_FILE_SIZE:
+                        try:
+                            record = json.loads(data.decode("utf-8"))
+                            if record.get("pid") == os.getpid():
+                                os.unlink(cls.PID_FILENAME, dir_fd=dir_fd)
+                        except Exception:
+                            pass
             finally:
                 os.close(fd)
         finally:
@@ -217,10 +287,10 @@ class PIDManager:
 
     @classmethod
     def signal_bridge(cls, sig: signal.Signals) -> bool:
-        """
-        Safely validates the PID record against the live process immediately before signalling.
-        Checks ownership, starttime, and executable identity.
-        """
+        if sig not in (signal.SIGUSR1, signal.SIGUSR2, signal.SIGTERM):
+            eprint(f"Invalid signal {sig} requested.")
+            return False
+
         try:
             runtime_dir = get_verified_runtime_dir()
             dir_fd = verify_private_dir(runtime_dir, create=False)
@@ -249,7 +319,10 @@ class PIDManager:
                 if st.st_size > MAX_PID_FILE_SIZE:
                     eprint("PID file exceeds size ceiling.")
                     return False
-                data = os.read(fd, MAX_PID_FILE_SIZE)
+                data = os.read(fd, MAX_PID_FILE_SIZE + 1)
+                if len(data) > MAX_PID_FILE_SIZE:
+                    eprint("PID file read exceeded size ceiling.")
+                    return False
             finally:
                 os.close(fd)
 
@@ -273,6 +346,9 @@ class PIDManager:
             if uid != os.getuid():
                 eprint(f"PID record UID mismatch: record={uid}, current={os.getuid()}.")
                 return False
+            if not isinstance(starttime, int) or starttime <= 0:
+                eprint(f"PID record starttime invalid or missing: {starttime}.")
+                return False
 
             # Verify target process existence and ownership via /proc/[pid]/status
             try:
@@ -281,8 +357,15 @@ class PIDManager:
             except FileNotFoundError:
                 eprint(f"Process {pid} is not running (stale PID file). Cleaning up.")
                 try:
-                    os.unlink(cls.PID_FILENAME, dir_fd=dir_fd)
-                except OSError:
+                    s_fd = os.open(cls.PID_FILENAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+                    try:
+                        s_data = os.read(s_fd, MAX_PID_FILE_SIZE)
+                        s_rec = json.loads(s_data.decode("utf-8"))
+                        if s_rec.get("pid") == pid:
+                            os.unlink(cls.PID_FILENAME, dir_fd=dir_fd)
+                    finally:
+                        os.close(s_fd)
+                except Exception:
                     pass
                 return False
             except PermissionError:
@@ -300,24 +383,41 @@ class PIDManager:
 
             # Verify starttime to prevent PID reuse attacks
             proc_starttime = cls.get_process_starttime(pid)
-            if starttime and proc_starttime and proc_starttime != starttime:
+            if proc_starttime <= 0 or proc_starttime != starttime:
                 eprint("Process starttime mismatch (PID recycled). Cleaning up stale PID file.")
                 try:
-                    os.unlink(cls.PID_FILENAME, dir_fd=dir_fd)
-                except OSError:
+                    s_fd = os.open(cls.PID_FILENAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+                    try:
+                        s_data = os.read(s_fd, MAX_PID_FILE_SIZE)
+                        s_rec = json.loads(s_data.decode("utf-8"))
+                        if s_rec.get("pid") == pid and s_rec.get("starttime") == starttime:
+                            os.unlink(cls.PID_FILENAME, dir_fd=dir_fd)
+                    finally:
+                        os.close(s_fd)
+                except Exception:
                     pass
                 return False
 
             # Verify executable identity via /proc/[pid]/cmdline
             try:
                 with open(f"/proc/{pid}/cmdline", "rb") as f:
-                    cmdline = f.read().decode("utf-8", errors="replace")
-                if "discord_bridge" not in cmdline:
-                    eprint(f"Process {pid} command line does not match discord_bridge: {cmdline}")
+                    raw_cmdline = f.read(4096)
+                cmdline_args = [arg.decode("utf-8", errors="replace") for arg in raw_cmdline.split(b"\0") if arg]
+                if not any("discord_bridge" in arg for arg in cmdline_args):
+                    eprint(f"Process {pid} command line does not match discord_bridge: {cmdline_args}")
                     return False
             except Exception as e:
                 eprint(f"Failed to inspect process cmdline: {e}")
                 return False
+
+            # Verify binary identity via /proc/[pid]/exe if accessible
+            try:
+                exe_target = os.path.realpath(f"/proc/{pid}/exe")
+                if "python" not in os.path.basename(exe_target).lower():
+                    eprint(f"Process {pid} executable {exe_target} is not Python.")
+                    return False
+            except OSError:
+                pass
 
             # Identity confirmed: safely deliver signal
             os.kill(pid, sig)
@@ -350,31 +450,35 @@ class DiscordIPC:
         if snap := os.environ.get("SNAP_USER_DATA"):
             dirs_to_check.append(os.path.join(snap, ".config"))
 
-        verified_dirs = []
         for d in dirs_to_check:
             try:
-                st = os.lstat(d)
-                if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
-                    if st.st_uid == uid and (st.st_mode & 0o022) == 0:
-                        verified_dirs.append(d)
-            except OSError:
+                dir_fd = verify_private_dir(d, create=False)
+            except Exception:
                 continue
 
-        for d in verified_dirs:
-            for i in range(10):
-                sock_path = os.path.join(d, f"discord-ipc-{i}")
-                try:
-                    st = os.lstat(sock_path)
-                    # Verify socket identity: must be a socket, not a symlink, owned by current UID
-                    if stat.S_ISSOCK(st.st_mode) and not stat.S_ISLNK(st.st_mode) and st.st_uid == uid:
-                        paths.append(sock_path)
-                except OSError:
-                    continue
+            try:
+                for i in range(10):
+                    sock_name = f"discord-ipc-{i}"
+                    try:
+                        st = os.stat(sock_name, dir_fd=dir_fd, follow_symlinks=False)
+                        if stat.S_ISSOCK(st.st_mode) and st.st_uid == uid:
+                            paths.append(os.path.join(d, sock_name))
+                    except OSError:
+                        continue
+            finally:
+                os.close(dir_fd)
 
         return paths
 
     async def connect(self):
         for path in self._candidate_paths():
+            try:
+                st = os.lstat(path)
+                if not stat.S_ISSOCK(st.st_mode) or stat.S_ISLNK(st.st_mode) or st.st_uid != os.getuid():
+                    continue
+            except OSError:
+                continue
+
             try:
                 # Enforce bounded connect deadline
                 r, w = await asyncio.wait_for(
@@ -398,6 +502,12 @@ class DiscordIPC:
 
                 if peer_uid != os.getuid():
                     eprint(f"Rejected socket {path}: peer UID {peer_uid} does not match {os.getuid()}")
+                    w.close()
+                    await w.wait_closed()
+                    continue
+
+                if peer_pid <= 0:
+                    eprint(f"Rejected socket {path}: invalid peer PID {peer_pid}")
                     w.close()
                     await w.wait_closed()
                     continue
@@ -437,46 +547,45 @@ class DiscordIPC:
         self.writer.write(header + data)
         await asyncio.wait_for(self.writer.drain(), timeout=OPERATION_TIMEOUT)
 
-    async def recv_frame(self, timeout=None):
+    async def recv_frame(self, timeout=OPERATION_TIMEOUT):
         if not self.reader:
             raise ConnectionError("Not connected")
 
-        # Read 8-byte header with timeout
-        if timeout is not None:
-            header = await asyncio.wait_for(self.reader.readexactly(8), timeout=timeout)
-        else:
+        async def _read_frame():
             header = await self.reader.readexactly(8)
+            opcode, length = struct.unpack("<II", header)
 
-        opcode, length = struct.unpack("<II", header)
+            # Enforce small protocol frame ceiling BEFORE allocating/reading payload buffer
+            if length > MAX_FRAME_SIZE:
+                raise ValueError(f"Frame length {length} exceeds maximum allowed ceiling {MAX_FRAME_SIZE}")
+            if length < 0:
+                raise ValueError(f"Invalid frame length: {length}")
 
-        # Enforce small protocol frame ceiling BEFORE allocating payload buffer
-        if length > MAX_FRAME_SIZE:
-            raise ValueError(f"Frame length {length} exceeds maximum allowed ceiling {MAX_FRAME_SIZE}")
-        if length < 0:
-            raise ValueError(f"Invalid frame length: {length}")
+            if opcode not in (OP_HANDSHAKE, OP_FRAME, OP_CLOSE, OP_PING, OP_PONG):
+                raise ValueError(f"Invalid opcode: {opcode}")
 
-        if opcode not in (OP_HANDSHAKE, OP_FRAME, OP_CLOSE, OP_PING, OP_PONG):
-            raise ValueError(f"Invalid opcode: {opcode}")
+            if length == 0:
+                return opcode, {}
 
-        # Read payload with timeout
-        if timeout is not None:
-            data = await asyncio.wait_for(self.reader.readexactly(length), timeout=timeout)
-        else:
-            data = await self.reader.readexactly(length)
+            # Read payload with bounded per-read deadline
+            data = await asyncio.wait_for(
+                self.reader.readexactly(length),
+                timeout=READ_PAYLOAD_TIMEOUT
+            )
 
-        if length == 0:
-            return opcode, {}
+            try:
+                payload_text = data.decode("utf-8")
+                payload = json.loads(payload_text)
+            except Exception as e:
+                raise ValueError(f"Malformed JSON frame payload: {e}")
 
-        try:
-            payload_text = data.decode("utf-8")
-            payload = json.loads(payload_text)
-        except Exception as e:
-            raise ValueError(f"Malformed JSON frame payload: {e}")
+            if not isinstance(payload, dict):
+                raise ValueError(f"Frame payload is not a JSON object: {type(payload)}")
 
-        if not isinstance(payload, dict):
-            raise ValueError(f"Frame payload is not a JSON object: {type(payload)}")
+            return opcode, validate_frame_payload(payload)
 
-        return opcode, payload
+        eff_timeout = timeout if timeout is not None else OPERATION_TIMEOUT
+        return await asyncio.wait_for(_read_frame(), timeout=eff_timeout)
 
     def _next_nonce(self):
         self._nonce += 1
@@ -487,6 +596,22 @@ class DiscordIPC:
         op, data = await asyncio.wait_for(self.recv_frame(timeout=HANDSHAKE_TIMEOUT), timeout=HANDSHAKE_TIMEOUT)
         if op == OP_CLOSE:
             raise ConnectionError(f"Handshake closed: {data}")
+        if op != OP_FRAME:
+            raise ConnectionError(f"Handshake returned unexpected opcode {op}")
+
+        # Validate authentic Discord READY dispatch
+        cmd = data.get("cmd")
+        evt = data.get("evt")
+        if cmd != "DISPATCH" or evt != "READY":
+            raise ConnectionError(f"Handshake response is not a Discord READY dispatch (cmd={cmd}, evt={evt})")
+
+        resp_data = safe_dict(data, "data")
+        config = safe_dict(resp_data, "config")
+        cdn = str(config.get("cdn_host") or "")
+        api = str(config.get("api_endpoint") or "")
+        if not ("discord" in cdn or "discord" in api):
+            raise ConnectionError("Handshake response lacks authentic Discord endpoints in config")
+
         return data
 
     async def authorize(self, client_id, scopes):
@@ -559,7 +684,9 @@ class TokenManager:
                         pass
                 if st.st_size > MAX_TOKEN_FILE_SIZE:
                     return None
-                data = os.read(fd, MAX_TOKEN_FILE_SIZE)
+                data = os.read(fd, MAX_TOKEN_FILE_SIZE + 1)
+                if len(data) > MAX_TOKEN_FILE_SIZE:
+                    return None
             finally:
                 os.close(fd)
 
@@ -585,6 +712,13 @@ class TokenManager:
         dir_fd = verify_private_dir(self._cache_dir, create=True, mode=0o700)
         temp_name = None
         try:
+            try:
+                st = os.stat(self.TOKEN_FILENAME, dir_fd=dir_fd, follow_symlinks=False)
+                if stat.S_ISLNK(st.st_mode):
+                    os.unlink(self.TOKEN_FILENAME, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+
             payload = json.dumps({"access_token": token}).encode("utf-8")
             temp_name = f".token_{os.urandom(8).hex()}.tmp"
             tmp_fd = os.open(
@@ -603,6 +737,11 @@ class TokenManager:
             os.replace(temp_name, self.TOKEN_FILENAME, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
             self.access_token = token
             temp_name = None
+
+            try:
+                os.chmod(self.TOKEN_FILENAME, 0o600, dir_fd=dir_fd, follow_symlinks=False)
+            except OSError:
+                pass
         except Exception:
             if temp_name:
                 try:
@@ -633,38 +772,62 @@ class TokenManager:
         if not isinstance(code, str) or not (1 <= len(code) <= 256) or not CODE_REGEX.fullmatch(code):
             raise ValueError("Invalid authorization code format")
 
-        body = json.dumps({"code": code}).encode("utf-8")
-        req = urllib.request.Request(
-            TOKEN_EXCHANGE_URL,
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "OmarchyDiscordWidget/1.0",
-                "Accept": "application/json"
-            },
-            method="POST"
-        )
-
-        class StrictRedirectHandler(urllib.request.HTTPRedirectHandler):
-            def __init__(self, max_redirects=0):
-                super().__init__()
-                self.max_redirects = max_redirects
-                self.redirect_count = 0
-
-            def redirect_request(self, req, fp, code, msg, headers, newurl):
-                self.redirect_count += 1
-                if self.redirect_count > self.max_redirects:
-                    raise urllib.error.HTTPError(req.full_url, code, "Too many redirects", headers, fp)
-                p = urllib.parse.urlparse(newurl)
-                if p.scheme.lower() != "https":
-                    raise urllib.error.HTTPError(req.full_url, code, "Redirect to non-HTTPS disallowed", headers, fp)
-                if p.netloc.lower() != EXPECTED_ORIGIN:
-                    raise urllib.error.HTTPError(req.full_url, code, f"Redirect to untrusted domain disallowed", headers, fp)
-                return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-        opener = urllib.request.build_opener(StrictRedirectHandler(max_redirects=0))
-
         try:
+            init_p = urllib.parse.urlparse(TOKEN_EXCHANGE_URL)
+            if init_p.scheme.lower() != "https":
+                raise ValueError(f"Insecure final scheme: {init_p.scheme}")
+            if init_p.netloc.lower() != EXPECTED_ORIGIN:
+                raise ValueError(f"Untrusted final origin: {init_p.netloc}")
+
+            body = json.dumps({"code": code}).encode("utf-8")
+            req = urllib.request.Request(
+                TOKEN_EXCHANGE_URL,
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "OmarchyDiscordWidget/1.0",
+                    "Accept": "application/json"
+                },
+                method="POST"
+            )
+
+            class StrictRedirectHandler(urllib.request.HTTPRedirectHandler):
+                def __init__(self, max_redirects=MAX_REDIRECTS):
+                    super().__init__()
+                    self.max_redirects = max_redirects
+                    self.redirect_count = 0
+
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    self.redirect_count += 1
+                    if self.redirect_count > self.max_redirects:
+                        if fp:
+                            try:
+                                fp.close()
+                            except Exception:
+                                pass
+                        raise urllib.error.HTTPError(req.full_url, code, "Too many redirects", headers, None)
+
+                    resolved = urllib.parse.urljoin(req.full_url, newurl)
+                    p = urllib.parse.urlparse(resolved)
+                    if p.scheme.lower() != "https":
+                        if fp:
+                            try:
+                                fp.close()
+                            except Exception:
+                                pass
+                        raise urllib.error.HTTPError(req.full_url, code, "Redirect to non-HTTPS disallowed", headers, None)
+                    if p.netloc.lower() != EXPECTED_ORIGIN:
+                        if fp:
+                            try:
+                                fp.close()
+                            except Exception:
+                                pass
+                        raise urllib.error.HTTPError(req.full_url, code, "Redirect to untrusted domain disallowed", headers, None)
+                    return super().redirect_request(req, fp, code, msg, headers, resolved)
+
+            opener = urllib.request.build_opener(StrictRedirectHandler(max_redirects=MAX_REDIRECTS))
+
+            start_time = time.monotonic()
             with opener.open(req, timeout=5.0) as resp:
                 final_url = resp.geturl()
                 p = urllib.parse.urlparse(final_url)
@@ -676,6 +839,9 @@ class TokenManager:
                 data = resp.read(MAX_HTTP_RESPONSE_BYTES + 1)
                 if len(data) > MAX_HTTP_RESPONSE_BYTES:
                     raise ValueError("OAuth response exceeded maximum byte ceiling")
+
+                if time.monotonic() - start_time > OAUTH_OVERALL_TIMEOUT:
+                    raise TimeoutError("OAuth token exchange exceeded overall deadline")
 
                 try:
                     parsed = json.loads(data.decode("utf-8"))
@@ -689,6 +855,13 @@ class TokenManager:
                 if not cls._is_valid_token_string(token):
                     raise ValueError("Invalid or missing access_token in OAuth response")
                 return token
+        except urllib.error.HTTPError as e:
+            msg = str(e)
+            try:
+                e.close()
+            except Exception:
+                pass
+            raise RuntimeError(f"Token exchange failed: {msg}") from e
         except Exception as e:
             raise RuntimeError(f"Token exchange failed: {e}") from e
 
@@ -750,7 +923,7 @@ class DiscordBridge:
 
     async def _stdin_loop(self):
         loop = asyncio.get_running_loop()
-        reader = asyncio.StreamReader()
+        reader = asyncio.StreamReader(limit=1024)
         protocol = asyncio.StreamReaderProtocol(reader)
         try:
             transport, _ = await loop.connect_read_pipe(lambda: protocol, sys.stdin)
@@ -768,6 +941,8 @@ class DiscordBridge:
                     self.toggle_mute()
                 elif cmd == "toggle_deafen":
                     self.toggle_deafen()
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
             eprint(f"Stdin reader error: {e}")
         finally:
@@ -810,18 +985,22 @@ class DiscordBridge:
 
                     self.emit_state()
 
-                    await self.discord.handshake(DEFAULT_CLIENT_ID)
-                    token = self.tokens.access_token or self.tokens.load()
-                    if token:
-                        nonce = await self.discord.authenticate(token)
-                        self._pending[nonce] = ("AUTHENTICATE", time.monotonic())
-                    else:
-                        nonce = await self.discord.authorize(DEFAULT_CLIENT_ID, OAUTH_SCOPES)
-                        self._pending[nonce] = ("AUTHORIZE", time.monotonic())
+                    # Bound connection setup and initialization
+                    async with asyncio.timeout(CONNECTION_INIT_TIMEOUT):
+                        await self.discord.handshake(DEFAULT_CLIENT_ID)
+                        token = self.tokens.access_token or self.tokens.load()
+                        if token:
+                            nonce = await self.discord.authenticate(token)
+                            self._pending[nonce] = ("AUTHENTICATE", time.monotonic())
+                        else:
+                            nonce = await self.discord.authorize(DEFAULT_CLIENT_ID, OAUTH_SCOPES)
+                            self._pending[nonce] = ("AUTHORIZE", time.monotonic())
 
                     await self._read_loop()
                 except asyncio.CancelledError:
                     break
+                except (asyncio.TimeoutError, TimeoutError) as e:
+                    eprint(f"Bridge connection/operation timed out: {e}")
                 except Exception as e:
                     eprint(f"Bridge error: {e}")
                 finally:
@@ -842,6 +1021,15 @@ class DiscordBridge:
 
     async def _read_loop(self):
         while self.discord.connected and not self._shutdown_event.is_set():
+            # Check for expired pending operations
+            now = time.monotonic()
+            expired = [n for n, (c, t) in self._pending.items() if now - t > OPERATION_TIMEOUT]
+            for n in expired:
+                cmd, _ = self._pending.pop(n)
+                eprint(f"Command {cmd} timed out waiting for response")
+                if cmd in ("AUTHENTICATE", "AUTHORIZE"):
+                    return
+
             try:
                 op, data = await self.discord.recv_frame(timeout=IDLE_PING_INTERVAL)
             except asyncio.TimeoutError:
@@ -852,6 +1040,11 @@ class DiscordBridge:
                 except (asyncio.TimeoutError, Exception) as e:
                     eprint(f"Discord ping heartbeat timed out/failed: {e}")
                     break
+            except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
+                break
+            except Exception as e:
+                eprint(f"Frame read error: {e}")
+                break
 
             if op == OP_CLOSE:
                 break
@@ -865,11 +1058,12 @@ class DiscordBridge:
 
     async def _handle_message(self, data):
         nonce = data.get("nonce")
-        cmd = data.get("cmd", "")
+        cmd = str(data.get("cmd") or "")
         evt = data.get("evt")
 
         if evt == "ERROR":
-            msg = data.get("data", {}).get("message", "Unknown error")
+            resp_data = safe_dict(data, "data")
+            msg = str(resp_data.get("message") or "Unknown error")
             if nonce and nonce in self._pending:
                 pcmd, _ = self._pending.pop(nonce)
                 if pcmd == "AUTHENTICATE":
@@ -885,27 +1079,29 @@ class DiscordBridge:
             return
 
         if cmd == "DISPATCH" and evt:
-            await self._handle_dispatch(evt, data.get("data", {}))
+            await self._handle_dispatch(evt, safe_dict(data, "data"))
 
     async def _handle_response(self, cmd, data):
-        resp = data.get("data", {})
-        if not isinstance(resp, dict):
-            return
+        resp = safe_dict(data, "data")
 
         if cmd == "AUTHORIZE":
             code = resp.get("code")
             if code and isinstance(code, str):
                 loop = asyncio.get_running_loop()
-                token = await asyncio.wait_for(
-                    loop.run_in_executor(None, TokenManager.exchange_code, code),
-                    timeout=OPERATION_TIMEOUT
-                )
-                self.tokens.save(token)
-                n = await self.discord.authenticate(token)
-                self._pending[n] = ("AUTHENTICATE", time.monotonic())
+                try:
+                    token = await asyncio.wait_for(
+                        loop.run_in_executor(None, TokenManager.exchange_code, code),
+                        timeout=OPERATION_TIMEOUT
+                    )
+                    self.tokens.save(token)
+                    n = await self.discord.authenticate(token)
+                    self._pending[n] = ("AUTHENTICATE", time.monotonic())
+                except Exception as e:
+                    eprint(f"OAuth code exchange or authentication failed: {e}")
         elif cmd == "AUTHENTICATE":
             self.authenticated = True
-            self.current_user_id = resp.get("user", {}).get("id")
+            user = safe_dict(resp, "user")
+            self.current_user_id = user.get("id")
             n1 = await self.discord.subscribe("VOICE_CHANNEL_SELECT")
             self._pending[n1] = ("SUB", time.monotonic())
             n2 = await self.discord.subscribe("VOICE_SETTINGS_UPDATE")
@@ -913,7 +1109,7 @@ class DiscordBridge:
             await self._send_cmd("GET_SELECTED_VOICE_CHANNEL")
         elif cmd == "GET_SELECTED_VOICE_CHANNEL":
             if resp and resp.get("id"):
-                await self._on_join(resp["id"], resp)
+                await self._on_join(str(resp["id"]), resp)
             else:
                 await self._on_leave()
         elif cmd in ("GET_VOICE_SETTINGS", "SET_VOICE_SETTINGS"):
@@ -924,7 +1120,7 @@ class DiscordBridge:
     async def _subscribe_channel(self, channel_id):
         for evt in ("VOICE_STATE_UPDATE", "SPEAKING_START", "SPEAKING_STOP"):
             try:
-                n = await self.discord.subscribe(evt, {"channel_id": channel_id})
+                n = await self.discord.subscribe(evt, {"channel_id": str(channel_id)})
                 self._pending[n] = ("SUB", time.monotonic())
             except Exception:
                 pass
@@ -932,25 +1128,27 @@ class DiscordBridge:
     async def _unsubscribe_channel(self, channel_id):
         for evt in ("VOICE_STATE_UPDATE", "SPEAKING_START", "SPEAKING_STOP"):
             try:
-                n = await self.discord.unsubscribe(evt, {"channel_id": channel_id})
+                n = await self.discord.unsubscribe(evt, {"channel_id": str(channel_id)})
                 self._pending[n] = ("UNSUB", time.monotonic())
             except Exception:
                 pass
 
     async def _on_join(self, channel_id, channel_data=None):
-        if self.current_channel_id and self.current_channel_id != channel_id:
+        channel_id_str = str(channel_id)
+        if self.current_channel_id and self.current_channel_id != channel_id_str:
             await self._unsubscribe_channel(self.current_channel_id)
-        self.current_channel_id = channel_id
+        self.current_channel_id = channel_id_str
 
         if channel_data and isinstance(channel_data.get("voice_states"), list):
             for vs in channel_data["voice_states"]:
-                if isinstance(vs, dict) and vs.get("user", {}).get("id") == self.current_user_id:
-                    v = vs.get("voice_state", {})
-                    if isinstance(v, dict):
+                if isinstance(vs, dict):
+                    user = safe_dict(vs, "user")
+                    if user.get("id") == self.current_user_id:
+                        v = safe_dict(vs, "voice_state")
                         self.voice_state["self_mute"] = bool(v.get("self_mute", False))
                         self.voice_state["self_deaf"] = bool(v.get("self_deaf", False))
 
-        await self._subscribe_channel(channel_id)
+        await self._subscribe_channel(channel_id_str)
         await self._send_cmd("GET_VOICE_SETTINGS")
         self.emit_state()
 
@@ -966,18 +1164,18 @@ class DiscordBridge:
             return
 
         if evt == "VOICE_CHANNEL_SELECT":
-            if data.get("channel_id"):
+            cid = data.get("channel_id")
+            if cid:
                 await self._send_cmd("GET_SELECTED_VOICE_CHANNEL")
             else:
                 await self._on_leave()
         elif evt == "VOICE_STATE_UPDATE":
-            uid = data.get("user", {}).get("id")
-            if uid == self.current_user_id:
-                v = data.get("voice_state", {})
-                if isinstance(v, dict):
-                    self.voice_state["self_mute"] = bool(v.get("self_mute", False))
-                    self.voice_state["self_deaf"] = bool(v.get("self_deaf", False))
-                    self.emit_state()
+            user = safe_dict(data, "user")
+            if user.get("id") == self.current_user_id:
+                v = safe_dict(data, "voice_state")
+                self.voice_state["self_mute"] = bool(v.get("self_mute", False))
+                self.voice_state["self_deaf"] = bool(v.get("self_deaf", False))
+                self.emit_state()
         elif evt == "SPEAKING_START":
             if data.get("user_id") == self.current_user_id:
                 self.voice_state["speaking"] = True

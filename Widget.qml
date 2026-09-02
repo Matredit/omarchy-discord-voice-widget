@@ -10,6 +10,9 @@ BarWidget {
 
   property string _pluginDir: {
     var url = Qt.resolvedUrl(".").toString().replace("file://", "")
+    try {
+      url = decodeURIComponent(url)
+    } catch (e) {}
     return url.endsWith("/") ? url : url + "/"
   }
 
