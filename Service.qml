@@ -13,6 +13,18 @@ Item {
   property string discordState: "tray"
   property bool discordRunning: false
 
+  function toggleMute() {
+    if (bridgeProcess.running) {
+      bridgeProcess.write("toggle_mute\n")
+    }
+  }
+
+  function toggleDeafen() {
+    if (bridgeProcess.running) {
+      bridgeProcess.write("toggle_deafen\n")
+    }
+  }
+
   Component.onDestruction: {
     bridgeProcess.running = false
   }
@@ -21,6 +33,12 @@ Item {
     id: bridgeProcess
     command: ["python3", root._pluginDir + "discord_bridge.py"]
     running: true
+    stdinEnabled: true
+
+    onExited: function(exitCode, exitStatus) {
+      root.discordRunning = false
+      root.discordState = "tray"
+    }
 
     stdout: SplitParser {
       onRead: function(line) {

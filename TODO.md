@@ -1,12 +1,37 @@
-## Unacceptable Security problems with this plugin:
+## Security problems with this plugin:
 
-1. **The local IPC frame length is trusted before allocation.** `discord_bridge.py:recv_frame()` accepts any existing candidate `discord-ipc-*` pathname, reads an attacker-controlled 32-bit length and passes it directly to `readexactly(length)`, then decodes/parses the complete payload. Candidate paths, including `/tmp`, are not verified as an owned UNIX socket and no frame/JSON/schema/string limit exists. A planted endpoint can exhaust memory; once connected, the bridge also sends its cached OAuth access token to that endpoint during `AUTHENTICATE`. Verify the socket/peer identity as far as the platform allows, reject unsafe fallback paths, and enforce a small protocol frame ceiling before reading the payload.
+1. [x] **The local IPC frame length is trusted before allocation.**
+   - **Fixed**:
+     - `_candidate_paths()` validates parent directories: ensures they are owned by `os.getuid()`, have non-permissive modes (`st_mode & 0o022 == 0`), and are not symlinks. Unsafe fallback paths like raw `/tmp` are strictly rejected.
+     - Each candidate socket path is checked via `os.lstat()` to ensure it is a socket (`S_ISSOCK`), owned by the current user, and not a symlink.
+     - Connected UNIX sockets verify peer identity using `SO_PEERCRED`: immediately closes the connection if `peer_uid != os.getuid()` before transmitting any handshake or cached credentials.
+     - Enforces `MAX_FRAME_SIZE = 64 * 1024` ceiling before allocating or reading frame payloads. Validates opcode and enforces strict JSON dict schema.
 
-2. **OAuth token persistence follows predictable paths unsafely.** `TokenManager.load()` performs an unbounded `json.load` through an ordinary path. `save()` uses `O_TRUNC` without `O_NOFOLLOW`; it follows a planted symlink, does not tighten the mode of an existing file because the `0o600` argument only applies on creation, and does not verify/privatize the directory chain. Use a verified private directory, bounded/no-follow reads, an exclusive random mode-0600 temp file and atomic descriptor-relative replacement; reject links and reapply ownership/modes.
+2. [x] **OAuth token persistence follows predictable paths unsafely.**
+   - **Fixed**:
+     - `TokenManager` enforces a verified, privatized cache directory chain (`verify_private_dir` with mode `0700` and `O_NOFOLLOW`).
+     - `load()` uses `O_NOFOLLOW`, verifies regular file status and user ownership, tightens permissions to `0600` if needed, enforces a bounded read ceiling (`MAX_TOKEN_FILE_SIZE = 8 * 1024`), and validates token structure.
+     - `save()` writes to an exclusive random mode-0600 temp file (`O_CREAT | O_EXCL | O_NOFOLLOW`), explicitly tightens permissions with `os.fchmod(tmp_fd, 0o600)`, fsyncs, and executes atomic descriptor-relative replacement (`os.replace` with `src_dir_fd` and `dst_dir_fd`). Cleans up temp files on error.
 
-3. **The PID control path is not identity-bound.** The bridge writes predictable `discord_bridge.pid` with ordinary truncating `open()`, follows links, leaves stale files, and the `/tmp/opoii_discord_<uid>` fallback is not verified. `Widget.qml` then constructs a shell command from the runtime-directory path and unvalidated file contents, and signals that PID without checking ownership, start time or executable identity. A stale/replaced file can signal an unrelated process. Avoid the shell, keep control inside the service/bridge IPC, or validate a securely created PID record against the live process immediately before signalling.
+3. [x] **The PID control path is not identity-bound.**
+   - **Fixed**:
+     - `Widget.qml` completely eliminates shell execution and file reads, calling `discordService.toggleMute()` / `discordService.toggleDeafen()` to communicate directly with the daemon process over stdin IPC (`stdinEnabled: true`).
+     - Fallback runtime directories (`/tmp/opoii_discord_<uid>`) are strictly verified for user ownership, directory type, no symlinks, and mode `0700`.
+     - `PIDManager.write_pid()` writes an identity-bound JSON PID record containing `pid`, `uid`, `starttime` (from `/proc/[pid]/stat`), and executable identity (`comm`). Writes with mode `0600` and atomic descriptor-relative replace.
+     - Deterministically removes PID files upon clean exit, shutdown signals, and via `atexit`.
+     - For external hotkeys, `python3 discord_bridge.py --toggle-mute` and `--toggle-deafen` validate the target process identity against `/proc/[pid]/status` (UID match), `/proc/[pid]/stat` (start time match to prevent PID reuse attacks), and `/proc/[pid]/cmdline` before delivering signals. Stale PID files are cleaned up.
 
-4. **OAuth exchange input is unbounded and redirect handling is unrestricted.** `TokenManager.exchange_code()` calls `urlopen` and then full `resp.read()` before JSON parsing. Add a strict response-byte ceiling, overall deadline, redirect count and final HTTPS/origin validation before accepting a token.
+4. [x] **OAuth exchange input is unbounded and redirect handling is unrestricted.**
+   - **Fixed**:
+     - Input code is strictly validated against a safe ASCII format and bounded length (`1 <= len(code) <= 256`).
+     - Strict response byte ceiling (`MAX_HTTP_RESPONSE_BYTES = 32 * 1024`) enforces bounds during token reading.
+     - Redirect handling is restricted using a custom `StrictRedirectHandler` (`max_redirects = 0`) that disallows redirects.
+     - Validates final response URL to guarantee HTTPS scheme and expected origin (`streamkit.discord.com`).
+     - Bounded overall async execution deadline (`OPERATION_TIMEOUT = 10.0`s).
 
-5. **Lifecycle bounds are incomplete.** Discord handshake/frame reads have no per-operation or whole-connection deadline; a false socket can hold the singleton service indefinitely. Add connect/handshake/read deadlines and deterministic cancellation/cleanup, including PID-file cleanup.
+5. [x] **Lifecycle bounds are incomplete.**
+   - **Fixed**:
+     - Added strict timeouts to connection (`CONNECT_TIMEOUT = 2.0`s) and handshake (`HANDSHAKE_TIMEOUT = 5.0`s).
+     - Read loop incorporates an idle ping interval (`IDLE_PING_INTERVAL = 30.0`s) with active `OP_PING` heartbeat probes and a 5-second pong deadline (`PING_RESPONSE_TIMEOUT = 5.0`s) to terminate unresponsive or false sockets.
+     - Deterministic cancellation and shutdown handlers cleanly release resources and unlink the PID file.
 
