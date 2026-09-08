@@ -1,6 +1,5 @@
 import QtQuick
 import Quickshell
-import Quickshell.Io
 import qs.Ui
 import qs.Commons
 
@@ -22,29 +21,28 @@ BarWidget {
   property bool inVoiceChannel: discordState !== "tray" && discordRunning
 
   visible: inVoiceChannel
-  implicitWidth: inVoiceChannel ? iconImage.implicitWidth : 0
-  implicitHeight: inVoiceChannel ? iconImage.implicitHeight : 0
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
 
-  Image {
-    id: iconImage
-    anchors.centerIn: parent
-    source: inVoiceChannel ? "file://" + root._pluginDir + "icons/" + root.discordState + ".png" : ""
-    width: Style.space(14)
-    height: Style.space(14)
-    fillMode: Image.PreserveAspectFit
-  }
-
-  MouseArea {
+  BarIconButton {
+    id: button
     anchors.fill: parent
-    acceptedButtons: Qt.LeftButton | Qt.RightButton
-    cursorShape: Qt.PointingHandCursor
-    onClicked: function(mouse) {
-      if (!discordRunning || !discordService) return
-      if (mouse.button === Qt.LeftButton) {
-        discordService.toggleMute()
-      } else {
-        discordService.toggleDeafen()
+    bar: root.bar
+    iconComponent: Component {
+      Image {
+        anchors.centerIn: parent
+        source: root.inVoiceChannel ? "file://" + root._pluginDir + "icons/" + root.discordState + ".png" : ""
+        width: Style.bar.iconCanvas
+        height: Style.bar.iconCanvas
+        fillMode: Image.PreserveAspectFit
+        smooth: true
       }
+    }
+    tooltipText: root.inVoiceChannel ? root.discordState : ""
+    onPressed: function(b) {
+      if (!root.discordRunning || !root.discordService) return
+      if (b === Qt.RightButton) root.discordService.toggleDeafen()
+      else if (b === Qt.LeftButton) root.discordService.toggleMute()
     }
   }
 }
